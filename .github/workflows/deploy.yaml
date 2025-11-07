@@ -1,0 +1,192 @@
+---
+name: Workwave CI/CD Pipeline
+run-name: ${{ github.workflow }} triggered by @${{ github.actor }} for ${{ github.event.head_commit.message }} from ${{ github.ref_name }}
+on:
+  push:
+    branches:
+      - master # prod
+      - staging # staging
+      - development # dev
+
+jobs:
+  SonarScan:
+    name: SonarQube Scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1  
+
+      - name: SonarQube Scan
+        uses: SonarSource/sonarqube-scan-action@v4
+        with:
+          projectBaseDir: .
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+
+  write-creds-from-secrets:
+    name: 'Write env from secrets'
+    runs-on: ubuntu-latest
+    needs: [SonarScan]
+
+    steps:
+      - name: Checkout branch
+        uses: actions/checkout@v4
+
+      - name: Get branch names.
+        id: branch-names
+        uses: tj-actions/branch-names@v8
+      - name: Write .env.production from secrets
+        if: ${{ steps.branch-names.outputs.ref_branch == 'master' }}
+        id: prod_creds
+        run: |
+          echo "${{ secrets.WORKWAVE_PROD }}" > .env
+        env:
+          TM_ENV_PROD: ${{ secrets.WORKWAVE_PROD }}
+
+      - name: Write .env.development from secrets
+        if: ${{ steps.branch-names.outputs.ref_branch == 'development'}}
+        id: dev_creds
+        run: |
+          echo "${{ secrets.WORKWAVE_DEV }}" > .env
+        env:
+          TM_ENV_DEV: ${{ secrets.WORKWAVE_DEV }}
+
+      - name: Write .env.staging from secrets
+        if: ${{ steps.branch-names.outputs.ref_branch == 'staging'}}
+        id: staging_creds
+        run: |
+          echo "${{ secrets.WORKWAVE_STG }}" > .env
+        env:
+          TM_ENV_DEV: ${{ secrets.WORKWAVE_STG }}
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: creds-artifact
+          path: |
+            .env
+          include-hidden-files: true
+
+  docker-build-and-push:
+    name: 'Docker Build and Push'
+    runs-on: ubuntu-latest
+    needs: [write-creds-from-secrets]
+    permissions:
+      contents: 'read'
+      id-token: 'write'
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.ARGOCD_PAT }}
+
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: creds-artifact
+          path: ./
+
+      - name: Get branch names.
+        id: branch-names
+        uses: tj-actions/branch-names@v8
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: us-east-1  
+
+      - name: Get ECR login password
+        id: login-ecr
+        run: |
+          echo "password=$(aws ecr get-login-password --region us-east-1)" >> $GITHUB_OUTPUT
+
+      - name: Login to Amazon ECR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.us-east-1.amazonaws.com
+          username: AWS
+          password: ${{ steps.login-ecr.outputs.password }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Set Docker tag
+        id: set_tag
+        run: |
+          if [ "${GITHUB_REF_NAME}" = "master" ]; then
+            echo "TAG=prod-${GITHUB_SHA::7}" >> $GITHUB_ENV
+          elif [ "${GITHUB_REF_NAME}" = "development" ]; then
+            echo "TAG=dev-${GITHUB_SHA::7}" >> $GITHUB_ENV
+          elif [ "${GITHUB_REF_NAME}" = "staging" ]; then
+            echo "TAG=staging-${GITHUB_SHA::7}" >> $GITHUB_ENV
+          else
+            echo "TAG=latest-${GITHUB_SHA::7}" >> $GITHUB_ENV
+          fi
+
+      - name: Build image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile
+          push: true
+          tags: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.us-east-1.amazonaws.com/workwave/work:${{ env.TAG }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Update values.yaml with image tag
+        if: ${{ github.event_name == 'push' }}
+        run: |
+          BRANCH_NAME=${{ (github.ref_name == 'master' && 'prod' || github.ref_name == 'development' && 'dev' || github.ref_name == 'staging' && 'staging') }}
+          sed -i "s/tag: .*/tag: ${TAG}/" ./helm/workwave-chart/helmvars/${BRANCH_NAME}/values.yaml
+          git config --global user.name 'github-actions'
+          git config --global user.email 'github-actions@github.com'
+          git add ./helm/workwave-chart/helmvars/${BRANCH_NAME}/values.yaml
+          git commit -m "Update image tag to ${TAG} [skip ci]"
+          git fetch
+          git pull --rebase origin ${{ github.ref_name }}
+          git push
+        env:
+          GITHUB_TOKEN: ${{ secrets.ARGOCD_PAT }}
+
+
+      - name: Set up kubeconfig for target cluster
+        run: |
+          if [ "${{ github.ref_name }}" == "master" ]; then
+            echo "${{ secrets.KUBECONFIG_PROD }}" > $HOME/.kube/config
+          elif [ "${{ github.ref_name }}" == "staging" ]; then
+            echo "${{ secrets.KUBECONFIG_STAGING }}" > $HOME/.kube/config
+          elif [ "${{ github.ref_name }}" == "development" ]; then
+            echo "${{ secrets.KUBECONFIG_DEV }}" > $HOME/.kube/config
+          else
+            echo "Unsupported branch: ${{ github.ref_name }}"
+            exit 1
+          fi          
+
+      - name: Deploy to Kubernetes with Helm
+        if: (github.event_name == 'push' || (github.event_name == 'pull_request' && github.event.pull_request.merged == true)) && (github.ref_name == 'master' || github.ref_name == 'development' || github.ref_name == 'staging')
+        run: |
+        
+          BRANCH_NAME="${{ github.ref_name }}"
+          echo "Deploying for branch ${{ github.ref_name }}"
+          
+          if [[ "$BRANCH_NAME" == "master" ]]; then
+              ENV_DIR="prod"
+          elif [[ "$BRANCH_NAME" == "development" ]]; then
+              ENV_DIR="dev"
+          elif [[ "$BRANCH_NAME" == "staging" ]]; then
+              ENV_DIR="staging"
+          else
+             echo "Branch $BRANCH_NAME is not configured for deployment."
+             exit 0
+          fi
+
+          helm upgrade --install $RELEASE_NAME ./helm/workwave-chart \
+          -f ./helm/workwave-chart/helmvars/${ENV_DIR}/values.yaml \
+          --namespace tm-namespace --create-namespace \
+          --wait \
+          --timeout 5m \
+          --atomic

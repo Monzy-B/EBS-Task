@@ -1,0 +1,216 @@
+
+
+---
+# ConfigMap for RabbitMQ configuration
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: rabbitmq-config
+  namespace: rabbitmq
+data:
+  rabbitmq.conf: |
+    management.tcp.port = 15672
+    management.tcp.ip = 0.0.0.0
+    stomp.listeners.tcp.1 = 61613
+    loopback_users = none
+  enabled_plugins: |
+    [rabbitmq_management,rabbitmq_stomp].
+
+---
+# Secret for RabbitMQ credentials
+apiVersion: v1
+kind: Secret
+metadata:
+  name: rabbitmq-secret
+  namespace: rabbitmq
+type: Opaque
+data:
+  username: YWRtaW4=  
+  password: M3hQIzl2SyF0UjdtTHpRQEA=  
+
+
+---
+# RabbitMQ Deployment
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: rabbitmq
+  namespace: rabbitmq
+  labels:
+    app: rabbitmq
+spec:
+  serviceName: rabbitmq-headless
+  replicas: 1
+  selector:
+    matchLabels:
+      app: rabbitmq
+  template:
+    metadata:
+      labels:
+        app: rabbitmq
+    spec:
+      containers:
+      - name: rabbitmq
+        image: rabbitmq:3.11-management
+        ports:
+        - containerPort: 5672
+          name: amqp
+        - containerPort: 15672
+          name: management
+        - containerPort: 61613
+          name: stomp
+        env:
+        - name: RABBITMQ_DEFAULT_USER
+          valueFrom:
+            secretKeyRef:
+              name: rabbitmq-secret
+              key: username
+        - name: RABBITMQ_DEFAULT_PASS
+          valueFrom:
+            secretKeyRef:
+              name: rabbitmq-secret
+              key: password
+        volumeMounts:
+        - name: rabbitmq-data
+          mountPath: /var/lib/rabbitmq
+        - name: rabbitmq-config
+          mountPath: /etc/rabbitmq
+          readOnly: true
+        resources:
+          requests:
+            memory: "256Mi"
+            cpu: "250m"
+          limits:
+            memory: "512Mi"
+            cpu: "500m"
+        livenessProbe:
+          exec:
+            command: ["rabbitmq-diagnostics", "ping"]
+          initialDelaySeconds: 60
+          periodSeconds: 60
+          timeoutSeconds: 15
+        readinessProbe:
+          exec:
+            command: ["rabbitmq-diagnostics", "check_port_connectivity"]
+          initialDelaySeconds: 20
+          periodSeconds: 60
+          timeoutSeconds: 10
+      volumes:
+      - name: rabbitmq-config
+        configMap:
+          name: rabbitmq-config
+  volumeClaimTemplates:
+  - metadata:
+      name: rabbitmq-data
+    spec:
+      accessModes: ["ReadWriteOnce"]
+      storageClassName: gp3
+      resources:
+        requests:
+          storage: 8Gi
+
+---
+# ALB Ingress for RabbitMQ Management UI
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: rabbitmq-ingress
+  namespace: rabbitmq
+  annotations:
+    alb.ingress.kubernetes.io/scheme: internet-facing
+    alb.ingress.kubernetes.io/target-type: ip
+    alb.ingress.kubernetes.io/listen-ports: '[{"HTTP":80}, {"HTTPS":443}]'
+    alb.ingress.kubernetes.io/ssl-redirect: '443'
+    alb.ingress.kubernetes.io/certificate-arn: arn:aws:acm:eu-west-2:367521002816:certificate/3d834c70-5e5f-4d51-aa43-4e1c5b688ac6
+    alb.ingress.kubernetes.io/subnets: subnet-05f290860bc79af65,subnet-076547ed1e0c6316e,subnet-0d23241af3187d28f
+    
+    # Health check configuration for RabbitMQ Management UI
+    alb.ingress.kubernetes.io/healthcheck-protocol: HTTP
+    alb.ingress.kubernetes.io/healthcheck-path: /
+    alb.ingress.kubernetes.io/healthcheck-interval-seconds: '15'
+    alb.ingress.kubernetes.io/healthcheck-timeout-seconds: '5'
+    alb.ingress.kubernetes.io/success-codes: '200'
+    alb.ingress.kubernetes.io/healthy-threshold-count: '2'
+    alb.ingress.kubernetes.io/unhealthy-threshold-count: '2'
+    
+    # Backend protocol configuration
+    alb.ingress.kubernetes.io/backend-protocol: HTTP
+    alb.ingress.kubernetes.io/backend-protocol-version: HTTP1
+    
+    # Additional annotations for better stability
+    alb.ingress.kubernetes.io/target-group-attributes: deregistration_delay.timeout_seconds=30
+    
+    # Use the same ALB group to save costs
+    alb.ingress.kubernetes.io/group.name: my-group-prod
+spec:
+  ingressClassName: alb
+  rules:
+  - host: rabbitmq-prod.quizmoney.ng
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: rabbitmq-management
+            port:
+              number: 15672
+
+---
+# Service for AMQP and STOMP communication (ClusterIP)
+apiVersion: v1
+kind: Service
+metadata:
+  name: rabbitmq-service
+  namespace: rabbitmq
+  labels:
+    app: rabbitmq
+spec:
+  type: ClusterIP
+  ports:
+  - port: 5672
+    targetPort: 5672
+    name: amqp
+  - port: 61613
+    targetPort: 61613
+    name: stomp
+  selector:
+    app: rabbitmq
+
+---
+# Service for Management UI (ClusterIP)
+apiVersion: v1
+kind: Service
+metadata:
+  name: rabbitmq-management
+  namespace: rabbitmq
+  labels:
+    app: rabbitmq
+spec:
+  type: ClusterIP
+  ports:
+  - port: 15672
+    targetPort: 15672
+    name: management
+  selector:
+    app: rabbitmq
+
+
+--- 
+# Headless Service for RabbitMQ StatefulSet
+apiVersion: v1
+kind: Service
+metadata:
+  name: rabbitmq-headless
+  namespace: rabbitmq
+  labels:
+    app: rabbitmq
+spec:
+  clusterIP: None
+  selector:
+    app: rabbitmq
+  ports:
+  - port: 5672
+    name: amqp
+  - port: 15672
+    name: http
