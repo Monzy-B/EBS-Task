@@ -1,4 +1,4 @@
-### DevOps, Cloud Native eCommerce Platform
+# DevOps, Cloud Native eCommerce Platform
 
 ## Objective
 The objective is to design and implement a cloud-native, event driven eCommerce platform focused on scalability, resilency, and automation. The platform follows a microservices architecture and leverages Kubernetes, Helm, GitHub Actions, AWS EKS, and AWS ECR for deployment and orchestration. The entire setup emphasizes observability, continuous delivery, and fault tolerance.
@@ -42,19 +42,19 @@ The Blue Green deployment model is what I would use to achieve zero-downtime upd
 
 Two environments are maintained simultaneously. The active handles live production traffic while the other serves as a staging target for new releases.
 
-# Deployment of Green Environment:
+#### Deployment of Green Environment:
 A new version of the application is deployed to the inactive (Green) environment.
 
-# Validation and Testing:
+#### Validation and Testing:
 Automated smoke tests, health probes, and integration checks validate the Green environment.
 
-# Traffic Switch:
+#### Traffic Switch:
 Once validated, the load balancer or Kubernetes Service selector is updated to route traffic from Blue to Green.
 
-# Monitoring and Rollback:
+#### Monitoring and Rollback:
 Metrics, alerts, and logs are monitored for anomalies. If an issue occurs, traffic can be switched back instantly to the Blue environment.
 
-# Cleanup:
+#### Cleanup:
 After stability is confirmed, the Blue environment is updated or scaled down for the next release cycle.
 
 ## Benefits
@@ -70,7 +70,7 @@ After stability is confirmed, the Blue environment is updated or scaled down for
 
 
 ## CI/CD Automation
-## Continuous Integration (CI)
+### Continuous Integration (CI)
 The CI pipeline is implemented using GitHub actions
 The pipeline performs the following stages:
 - Build: Containerizes the microsrvices using Docker
@@ -78,14 +78,14 @@ The pipeline performs the following stages:
 - Code Quality Analysis: Scans code using SonarQube to enfore quality gates.
 - Image Push: Pushed the successfully built images to AWS ECR.
 
-## Continuous Delivery (CD)
-## Option 1 – GitOps (ArgoCD Integration):
+### Continuous Delivery (CD)
+### Option 1 – GitOps (ArgoCD Integration):
 - After Pushing the image, the CI pipeline automatically updates the values.yaml file in the Helm Chart Repository with the new image tag.
 - ArgoCD Continuously monitors this repository and detects the update
 - ArgoCD synchronizes the change into the Kubernetes cluster, deploying the new image to the environment.
 
 
-## Option 2 – Direct Helm Deployment:
+### Option 2 – Direct Helm Deployment:
 
 - The CI pipeline connects to the EKS cluster and runs helm upgrade --install with the new image tag.
 - The Helm chart manages the Blue-Green environment internally, switching traffic post-validation.
