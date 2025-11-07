@@ -1,5 +1,5 @@
 
-FROM node:14-slim AS build
+FROM node:24-slim AS build
 
 WORKDIR /app
 
@@ -10,7 +10,7 @@ RUN npm install
 COPY . .
 
 RUN npm run build
-
+# Multi Stage Build for Optimization.
 FROM nginx:alpine
 
 COPY --from=build /app/build /usr/share/nginx/html
